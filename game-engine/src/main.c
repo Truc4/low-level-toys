@@ -18,6 +18,16 @@ LRESULT CALLBACK MainWindowCallback(HWND Window, UINT Message, WPARAM WParam,
   case WM_ACTIVATEAPP: {
     OutputDebugStringA("WM_ACTIVATEAPP\n");
   } break;
+  case WM_PAINT: {
+    PAINTSTRUCT Paint;
+    HDC DeviceContext = BeginPaint(Window, &Paint);
+    int X = Paint.rcPaint.left;
+    int Y = Paint.rcPaint.top;
+    int Height = Paint.rcPaint.bottom - Paint.rcPaint.top;
+    int Width = Paint.rcPaint.right - Paint.rcPaint.left;
+    PatBlt(DeviceContext, X, Y, Width, Height, WHITENESS);
+    EndPaint(Window, &Paint);
+  } break;
   default: {
     Result = DefWindowProc(Window, Message, WParam, LParam);
   } break;
@@ -39,6 +49,19 @@ int CALLBACK WinMain(HINSTANCE Instance, HINSTANCE PrevInstance,
         0, WindowClass.lpszClassName, "HandmadeHero",
         WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,
         CW_USEDEFAULT, CW_USEDEFAULT, 0, 0, Instance, 0);
+    if (WindowHandle) {
+      MSG Message;
+      for (;;) {
+        BOOL MessageResult = (GetMessage(&Message, 0, 0, 0));
+        if (MessageResult > 0) {
+          TranslateMessage(&Message);
+          DispatchMessage(&Message);
+        } else {
+          break;
+        }
+      }
+    } else {
+    }
   } else {
   }
   return (0);
