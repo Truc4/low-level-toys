@@ -1,2 +1,8 @@
 CompileFlags:
-  Add: [-ID:/CEdev/include/]
+  Add: [
+    -ID:/CEdev/include,
+    -ID:/CEdev/include/sys,
+    -ID:/CEdev/include/ti,
+    -Duint24_t=unsigned long,
+    -Dint24_t=long  
+  ]
