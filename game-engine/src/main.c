@@ -1,5 +1,11 @@
 #include <windows.h>
 
+#define internal static
+#define local_persist static
+#define global_variable static
+
+global_variable BOOL Running;
+
 LRESULT CALLBACK MainWindowCallback(HWND Window, UINT Message, WPARAM WParam,
                                     LPARAM LParam) {
   LRESULT Result = 0;
@@ -9,10 +15,14 @@ LRESULT CALLBACK MainWindowCallback(HWND Window, UINT Message, WPARAM WParam,
   } break;
 
   case WM_DESTROY: {
+    // TODO Handle this as an error, recreate window
+    Running = FALSE;
     OutputDebugStringA("WM_DESTROY\n");
   } break;
 
   case WM_CLOSE: {
+    // TODO handle with a message to the user
+    Running = FALSE;
     OutputDebugStringA("WM_CLOSE\n");
   } break;
   case WM_ACTIVATEAPP: {
@@ -50,8 +60,9 @@ int CALLBACK WinMain(HINSTANCE Instance, HINSTANCE PrevInstance,
         WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,
         CW_USEDEFAULT, CW_USEDEFAULT, 0, 0, Instance, 0);
     if (WindowHandle) {
-      MSG Message;
-      for (;;) {
+      Running = TRUE;
+      while (Running) {
+        MSG Message;
         BOOL MessageResult = (GetMessage(&Message, 0, 0, 0));
         if (MessageResult > 0) {
           TranslateMessage(&Message);
