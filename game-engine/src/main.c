@@ -10,6 +10,21 @@
 #define local_persist static
 #define global_variable static
 
+// Sound constants
+#define BITSPERSSAMPLE 16
+#define SAMPLESPERSEC 44100
+#define CYCLESPERSEC 220
+#define VOLUME 0.5
+#define AUDIOBUFFERSIZEINCYCLES 10
+#define PI 3.14159265358979323846
+
+#define SAMPLESPERCYCLE ((int)(SAMPLESPERSEC / CYCLESPERSEC)) // 200
+#define AUDIOBUFFERSIZEINSAMPLES                                               \
+  (SAMPLESPERCYCLE * AUDIOBUFFERSIZEINCYCLES) // 2000
+#define AUDIOBUFFERSIZEINBYTES                                                 \
+  ((AUDIOBUFFERSIZEINSAMPLES * BITSPERSSAMPLE) / 8) // 4000
+// End sound
+
 typedef struct {
   BITMAPINFO Info;
   void *Memory;
@@ -18,8 +33,9 @@ typedef struct {
   int BytesPerPixel;
 } win32_offscreen_buffer;
 
-global_variable BOOL Running;
+global_variable BOOL GlobalRunning;
 global_variable win32_offscreen_buffer GlobalBackbuffer;
+global_variable byte GlobalSoundBuffer[AUDIOBUFFERSIZEINBYTES] = {0};
 
 typedef struct {
   int Width;
@@ -46,21 +62,6 @@ global_variable x_input_set_state *DyXInputSetState = XInputSetStateStub;
                XAUDIO2_PROCESSOR XAudio2Processor)
 // X_AUDIO2_CREATE(XAudioCreateStub) { return XAUDIO2_E_INVALID_CALL; }
 typedef X_AUDIO2_CREATE(x_audio2_create);
-
-#define BITSPERSSAMPLE 16
-#define SAMPLESPERSEC 44100
-#define CYCLESPERSEC 220
-#define VOLUME 0.5
-#define AUDIOBUFFERSIZEINCYCLES 10
-#define PI 3.14159265358979323846
-
-#define SAMPLESPERCYCLE ((int)(SAMPLESPERSEC / CYCLESPERSEC)) // 200
-#define AUDIOBUFFERSIZEINSAMPLES                                               \
-  (SAMPLESPERCYCLE * AUDIOBUFFERSIZEINCYCLES) // 2000
-#define AUDIOBUFFERSIZEINBYTES                                                 \
-  ((AUDIOBUFFERSIZEINSAMPLES * BITSPERSSAMPLE) / 8) // 4000
-
-byte m_buffer[AUDIOBUFFERSIZEINBYTES] = {0};
 
 internal void Win32LoadXInput(void) {
   HMODULE XInputLibrary = LoadLibrary("xinput1_4.dll");
@@ -127,21 +128,10 @@ internal void Win32InitXAudio(void) {
   }
   printf("INFO: Source voice created\n");
 
-  // Fill a buffer.
-  double phase = 0;
-  uint32_t bufferIndex = 0;
-  while (bufferIndex < AUDIOBUFFERSIZEINBYTES) {
-    phase += (2 * PI) / SAMPLESPERCYCLE;
-    int16_t sample = (int16_t)(sin(phase) * INT16_MAX * VOLUME);
-    m_buffer[bufferIndex++] = (byte)sample;        // little-endian low byte
-    m_buffer[bufferIndex++] = (byte)(sample >> 8); // little-endian high byte
-  }
-  printf("INFO: Audio buffer filled with generated tone\n");
-
   XAUDIO2_BUFFER xAudio2Buffer = {0};
   xAudio2Buffer.Flags = XAUDIO2_END_OF_STREAM;
   xAudio2Buffer.AudioBytes = AUDIOBUFFERSIZEINBYTES;
-  xAudio2Buffer.pAudioData = m_buffer;
+  xAudio2Buffer.pAudioData = GlobalSoundBuffer;
   xAudio2Buffer.PlayBegin = 0;
   xAudio2Buffer.PlayLength = 0;
   xAudio2Buffer.LoopBegin = 0;
@@ -227,13 +217,13 @@ internal LRESULT CALLBACK MainWindowCallback(HWND Window, UINT Message,
 
   case WM_DESTROY: {
     // TODO Handle this as an error, recreate window
-    Running = FALSE;
+    GlobalRunning = FALSE;
     OutputDebugStringA("WM_DESTROY\n");
   } break;
 
   case WM_CLOSE: {
     // TODO handle with a message to the user
-    Running = FALSE;
+    GlobalRunning = FALSE;
     OutputDebugStringA("WM_CLOSE\n");
   } break;
   case WM_ACTIVATEAPP: {
@@ -265,7 +255,7 @@ internal LRESULT CALLBACK MainWindowCallback(HWND Window, UINT Message,
     }
     BOOL AltKeyWasDown = ((LParam & (1 << 29)) != 0);
     if (VKCode == VK_F4 && AltKeyWasDown) {
-      Running = FALSE;
+      GlobalRunning = FALSE;
     }
   } break;
   case WM_PAINT: {
@@ -284,6 +274,19 @@ internal LRESULT CALLBACK MainWindowCallback(HWND Window, UINT Message,
   } break;
   }
   return (Result);
+}
+
+internal void Win32FillSoundBuffer() {
+  // Fill a buffer.
+  double phase = 0;
+  uint32_t bufferIndex = 0;
+  while (bufferIndex < AUDIOBUFFERSIZEINBYTES) {
+    phase += (2 * PI) / SAMPLESPERCYCLE;
+    int16_t sample = (int16_t)(sin(phase) * INT16_MAX * VOLUME);
+    GlobalSoundBuffer[bufferIndex++] = (byte)sample; // little-endian low byte
+    GlobalSoundBuffer[bufferIndex++] =
+        (byte)(sample >> 8); // little-endian high byte
+  }
 }
 
 int CALLBACK WinMain(HINSTANCE Instance, HINSTANCE PrevInstance,
@@ -307,14 +310,15 @@ int CALLBACK WinMain(HINSTANCE Instance, HINSTANCE PrevInstance,
                                   CW_USEDEFAULT, 0, 0, Instance, 0);
     if (Window) {
       Win32InitXAudio();
-      Running = TRUE;
+      BOOL SoundIsPlaying = FALSE;
+      GlobalRunning = TRUE;
       int XOffset = 0;
       int YOffset = 0;
-      while (Running) {
+      while (GlobalRunning) {
         MSG Message;
         while (PeekMessage(&Message, 0, 0, 0, PM_REMOVE)) {
           if (Message.message == WM_QUIT) {
-            Running = FALSE;
+            GlobalRunning = FALSE;
           }
           TranslateMessage(&Message);
           DispatchMessage(&Message);
@@ -346,6 +350,12 @@ int CALLBACK WinMain(HINSTANCE Instance, HINSTANCE PrevInstance,
         }
 
         RenderWeirdGradient(&GlobalBackbuffer, XOffset, YOffset);
+
+        if (!SoundIsPlaying) {
+          SoundIsPlaying = TRUE;
+          Win32FillSoundBuffer();
+        }
+
         HDC DeviceContext = GetDC(Window);
         win32_window_dimension WindowDimension = GetWindowDimension(Window);
         Win32DisplayBufferInWindow(DeviceContext, &GlobalBackbuffer,
