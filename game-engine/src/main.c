@@ -1,6 +1,9 @@
 #include <assert.h>
+#include <math.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <windows.h>
+#include <xaudio2.h>
 #include <xinput.h>
 
 #define internal static
@@ -30,22 +33,135 @@ typedef struct {
 typedef X_INPUT_GET_STATE(x_input_get_state);
 typedef X_INPUT_SET_STATE(x_input_set_state);
 
-X_INPUT_GET_STATE(XInputGetStateStub) { return 0; }
-X_INPUT_SET_STATE(XInputSetStateStub) { return 0; }
+X_INPUT_GET_STATE(XInputGetStateStub) { return ERROR_DEVICE_NOT_CONNECTED; }
+X_INPUT_SET_STATE(XInputSetStateStub) { return ERROR_DEVICE_NOT_CONNECTED; }
 
 global_variable x_input_get_state *DyXInputGetState = XInputGetStateStub;
 global_variable x_input_set_state *DyXInputSetState = XInputSetStateStub;
 #define XInputGetState DyXInputGetState
 #define XInputSetState DyXInputSetState
 
+#define X_AUDIO2_CREATE(name)                                                  \
+  HRESULT name(IXAudio2 **ppXAudio2, UINT32 Flags,                             \
+               XAUDIO2_PROCESSOR XAudio2Processor)
+// X_AUDIO2_CREATE(XAudioCreateStub) { return XAUDIO2_E_INVALID_CALL; }
+typedef X_AUDIO2_CREATE(x_audio2_create);
+
+#define BITSPERSSAMPLE 16
+#define SAMPLESPERSEC 44100
+#define CYCLESPERSEC 220
+#define VOLUME 0.5
+#define AUDIOBUFFERSIZEINCYCLES 10
+#define PI 3.14159265358979323846
+
+#define SAMPLESPERCYCLE ((int)(SAMPLESPERSEC / CYCLESPERSEC)) // 200
+#define AUDIOBUFFERSIZEINSAMPLES                                               \
+  (SAMPLESPERCYCLE * AUDIOBUFFERSIZEINCYCLES) // 2000
+#define AUDIOBUFFERSIZEINBYTES                                                 \
+  ((AUDIOBUFFERSIZEINSAMPLES * BITSPERSSAMPLE) / 8) // 4000
+
+byte m_buffer[AUDIOBUFFERSIZEINBYTES] = {0};
+
 internal void Win32LoadXInput(void) {
-  HMODULE XInputLibrary = LoadLibrary("xinput1_3.dll");
+  HMODULE XInputLibrary = LoadLibrary("xinput1_4.dll");
+  if (!XInputLibrary) {
+    XInputLibrary = LoadLibrary("xinput1_3.dll");
+  }
   if (XInputLibrary) {
     XInputGetState =
         (x_input_get_state *)GetProcAddress(XInputLibrary, "XInputGetState");
     XInputSetState =
         (x_input_set_state *)GetProcAddress(XInputLibrary, "XInputSetState");
   }
+}
+
+internal void Win32InitXAudio(void) {
+  HMODULE XAudioLibrary = LoadLibraryA("xaudio2_9.dll");
+  if (!XAudioLibrary) {
+    printf("ERROR: Failed to load xaudio2_9.dll\n");
+    return;
+  }
+  printf("INFO: Successfully loaded xaudio2_9.dll\n");
+
+  x_audio2_create *XAudio2Create =
+      (x_audio2_create *)GetProcAddress(XAudioLibrary, "XAudio2Create");
+  if (!XAudio2Create) {
+    printf("ERROR: Failed to get address of XAudio2Create\n");
+    return;
+  }
+  printf("INFO: Successfully got XAudio2Create function\n");
+
+  IXAudio2 *XAudio = 0;
+  if (!SUCCEEDED(XAudio2Create(&XAudio, 0, XAUDIO2_DEFAULT_PROCESSOR))) {
+    printf("ERROR: Failed to create XAudio2 interface\n");
+    return;
+  }
+  printf("INFO: XAudio2 interface created\n");
+
+  IXAudio2MasteringVoice *MasteringVoice;
+  if (!SUCCEEDED(XAudio->lpVtbl->CreateMasteringVoice(XAudio, &MasteringVoice,
+                                                      0, 0, 0, 0, 0, 0))) {
+    printf("ERROR: Failed to create mastering voice\n");
+    return;
+  }
+  printf("INFO: Mastering voice created\n");
+
+  // Define a format.
+  WAVEFORMATEX waveFormatEx = {0};
+  waveFormatEx.wFormatTag = WAVE_FORMAT_PCM;
+  waveFormatEx.nChannels = 1; // 1 channel
+  waveFormatEx.nSamplesPerSec = SAMPLESPERSEC;
+  waveFormatEx.nBlockAlign = waveFormatEx.nChannels * BITSPERSSAMPLE / 8;
+  waveFormatEx.nAvgBytesPerSec =
+      waveFormatEx.nSamplesPerSec * waveFormatEx.nBlockAlign;
+  waveFormatEx.wBitsPerSample = BITSPERSSAMPLE;
+  waveFormatEx.cbSize = 0;
+
+  // Create a source voice with that format.
+  IXAudio2SourceVoice *XAudio2SourceVoice;
+  HRESULT hr = XAudio->lpVtbl->CreateSourceVoice(
+      XAudio, &XAudio2SourceVoice, &waveFormatEx, 0, 1.0, 0, 0, 0);
+  if (!SUCCEEDED(hr)) {
+    printf("ERROR: Failed to create source voice. HRESULT = 0x%08lX\n", hr);
+    return;
+  }
+  printf("INFO: Source voice created\n");
+
+  // Fill a buffer.
+  double phase = 0;
+  uint32_t bufferIndex = 0;
+  while (bufferIndex < AUDIOBUFFERSIZEINBYTES) {
+    phase += (2 * PI) / SAMPLESPERCYCLE;
+    int16_t sample = (int16_t)(sin(phase) * INT16_MAX * VOLUME);
+    m_buffer[bufferIndex++] = (byte)sample;        // little-endian low byte
+    m_buffer[bufferIndex++] = (byte)(sample >> 8); // little-endian high byte
+  }
+  printf("INFO: Audio buffer filled with generated tone\n");
+
+  XAUDIO2_BUFFER xAudio2Buffer = {0};
+  xAudio2Buffer.Flags = XAUDIO2_END_OF_STREAM;
+  xAudio2Buffer.AudioBytes = AUDIOBUFFERSIZEINBYTES;
+  xAudio2Buffer.pAudioData = m_buffer;
+  xAudio2Buffer.PlayBegin = 0;
+  xAudio2Buffer.PlayLength = 0;
+  xAudio2Buffer.LoopBegin = 0;
+  xAudio2Buffer.LoopLength = 0;
+  xAudio2Buffer.LoopCount = XAUDIO2_LOOP_INFINITE;
+
+  // Submit the buffer to the source voice.
+  if (!SUCCEEDED(XAudio2SourceVoice->lpVtbl->SubmitSourceBuffer(
+          XAudio2SourceVoice, &xAudio2Buffer, 0))) {
+    printf("ERROR: Failed to submit source buffer\n");
+    return;
+  }
+  printf("INFO: Source buffer submitted\n");
+
+  // Start the voice.
+  if (!SUCCEEDED(XAudio2SourceVoice->lpVtbl->Start(XAudio2SourceVoice, 0, 0))) {
+    printf("ERROR: Failed to start source voice\n");
+    return;
+  }
+  printf("INFO: Source voice started successfully\n");
 }
 
 internal win32_window_dimension GetWindowDimension(HWND Window) {
@@ -123,10 +239,10 @@ internal LRESULT CALLBACK MainWindowCallback(HWND Window, UINT Message,
   case WM_ACTIVATEAPP: {
     OutputDebugStringA("WM_ACTIVATEAPP\n");
   } break;
-  case WM_SYSKEYDOWN: {
-
-  } break;
-  case WM_SYSKEYUP: {
+  case WM_SYSKEYDOWN:
+  case WM_SYSKEYUP:
+  case WM_KEYDOWN:
+  case WM_KEYUP: {
     uint32_t VKCode = WParam;
     BOOL WasDown = ((LParam & (1 << 30)) != 0);
     BOOL IsDown = ((LParam & (1 << 31)) == 0);
@@ -147,16 +263,10 @@ internal LRESULT CALLBACK MainWindowCallback(HWND Window, UINT Message,
       } else if (VKCode == VK_SPACE) {
       }
     }
-  } break;
-  case WM_KEYDOWN: {
-
-    uint32_t VKCode = WParam;
-    if (VKCode == 'W') {
+    BOOL AltKeyWasDown = ((LParam & (1 << 29)) != 0);
+    if (VKCode == VK_F4 && AltKeyWasDown) {
+      Running = FALSE;
     }
-    // LParam & (1 << 30);
-  } break;
-  case WM_KEYUP: {
-
   } break;
   case WM_PAINT: {
     PAINTSTRUCT Paint;
@@ -196,6 +306,7 @@ int CALLBACK WinMain(HINSTANCE Instance, HINSTANCE PrevInstance,
                                   CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
                                   CW_USEDEFAULT, 0, 0, Instance, 0);
     if (Window) {
+      Win32InitXAudio();
       Running = TRUE;
       int XOffset = 0;
       int YOffset = 0;
