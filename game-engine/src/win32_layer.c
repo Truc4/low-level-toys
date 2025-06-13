@@ -79,6 +79,17 @@ internal void Win32LoadXInput(void) {
   }
 }
 
+XAUDIO2_BUFFER xAudio2Buffer = {
+    XAUDIO2_END_OF_STREAM,
+    AUDIOBUFFERSIZEINBYTES,
+    GlobalSoundBuffer,
+    0,
+    0,
+    0,
+    0,
+    XAUDIO2_LOOP_INFINITE,
+};
+
 internal void Win32InitXAudio(void) {
   HMODULE XAudioLibrary = LoadLibraryA("xaudio2_9.dll");
   if (!XAudioLibrary) {
@@ -130,16 +141,6 @@ internal void Win32InitXAudio(void) {
     return;
   }
   printf("INFO: Source voice created\n");
-
-  XAUDIO2_BUFFER xAudio2Buffer = {0};
-  xAudio2Buffer.Flags = XAUDIO2_END_OF_STREAM;
-  xAudio2Buffer.AudioBytes = AUDIOBUFFERSIZEINBYTES;
-  xAudio2Buffer.pAudioData = GlobalSoundBuffer;
-  xAudio2Buffer.PlayBegin = 0;
-  xAudio2Buffer.PlayLength = 0;
-  xAudio2Buffer.LoopBegin = 0;
-  xAudio2Buffer.LoopLength = 0;
-  xAudio2Buffer.LoopCount = XAUDIO2_LOOP_INFINITE;
 
   // Submit the buffer to the source voice.
   if (!SUCCEEDED(XAudio2SourceVoice->lpVtbl->SubmitSourceBuffer(
@@ -264,19 +265,6 @@ internal LRESULT CALLBACK MainWindowCallback(HWND Window, UINT Message,
   return (Result);
 }
 
-internal void Win32FillSoundBuffer() {
-  // Fill a buffer.
-  double phase = 0;
-  uint32_t bufferIndex = 0;
-  while (bufferIndex < AUDIOBUFFERSIZEINBYTES) {
-    phase += (2 * PI) / SAMPLESPERCYCLE;
-    int16_t sample = (int16_t)(sin(phase) * INT16_MAX * VOLUME);
-    GlobalSoundBuffer[bufferIndex++] = (byte)sample; // little-endian low byte
-    GlobalSoundBuffer[bufferIndex++] =
-        (byte)(sample >> 8); // little-endian high byte
-  }
-}
-
 void platformMain(loopCallbackFn loopCallback) {
   platformLoopCallback = loopCallback;
 
@@ -354,11 +342,6 @@ int CALLBACK WinMain(HINSTANCE Instance, HINSTANCE PrevInstance,
           }
         }
 
-        if (!SoundIsPlaying) {
-          SoundIsPlaying = TRUE;
-          Win32FillSoundBuffer();
-        }
-
         HDC DeviceContext = GetDC(Window);
         win32_window_dimension WindowDimension = GetWindowDimension(Window);
         Win32DisplayBufferInWindow(DeviceContext, &GlobalBackbuffer,
@@ -377,7 +360,10 @@ int CALLBACK WinMain(HINSTANCE Instance, HINSTANCE PrevInstance,
             GlobalBackbuffer.Height,
             GlobalBackbuffer.BytesPerPixel,
         };
-        platformLoopCallback(&Buffer);
+
+        engine_sound_buffer SoundBuffer = {GlobalSoundBuffer, 0};
+        platformLoopCallback(&Buffer, &SoundBuffer);
+        SoundIsPlaying = SoundBuffer.SoundPlaying;
 
         int64_t CyclesElapsed = EndCycleCount - LastCycleCount;
 
