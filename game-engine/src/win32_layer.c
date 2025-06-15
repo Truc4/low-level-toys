@@ -7,25 +7,6 @@
 #include <xaudio2.h>
 #include <xinput.h>
 
-#define internal static
-#define local_persist static
-#define global_variable static
-
-// Sound constants
-#define BITSPERSSAMPLE 16
-#define SAMPLESPERSEC 44100
-#define CYCLESPERSEC 220
-#define VOLUME 0.5
-#define AUDIOBUFFERSIZEINCYCLES 10
-#define PI 3.14159265358979323846
-
-#define SAMPLESPERCYCLE ((int)(SAMPLESPERSEC / CYCLESPERSEC)) // 200
-#define AUDIOBUFFERSIZEINSAMPLES                                               \
-  (SAMPLESPERCYCLE * AUDIOBUFFERSIZEINCYCLES) // 2000
-#define AUDIOBUFFERSIZEINBYTES                                                 \
-  ((AUDIOBUFFERSIZEINSAMPLES * BITSPERSSAMPLE) / 8) // 4000
-// End sound
-
 typedef struct {
   BITMAPINFO Info;
   void *Memory;
@@ -65,6 +46,63 @@ global_variable x_input_set_state *DyXInputSetState = XInputSetStateStub;
 typedef X_AUDIO2_CREATE(x_audio2_create);
 
 loopCallbackFn platformLoopCallback = 0;
+inputEventCallbackFn platformInputEventCallback = 0;
+
+debug_read_file_result DEBUGPlatformReadEntireFile(char *Filename) {
+  debug_read_file_result Result = {};
+  HANDLE FileHandle = CreateFileA(Filename, GENERIC_READ, FILE_SHARE_READ, 0,
+                                  OPEN_EXISTING, 0, 0);
+  if (FileHandle != INVALID_HANDLE_VALUE) {
+    LARGE_INTEGER FileSize;
+    if (GetFileSizeEx(FileHandle, &FileSize)) {
+      uint32 FileSize32 = SafeTruncateUInt64(FileSize.QuadPart);
+      Result.Contents =
+          VirtualAlloc(0, FileSize.QuadPart, MEM_COMMIT, PAGE_READWRITE);
+      if (Result.Contents) {
+        DWORD BytesRead;
+        if (ReadFile(FileHandle, Result.Contents, FileSize32, &BytesRead, 0) &&
+            (FileSize32 == BytesRead)) {
+          Result.ContentsSize = FileSize32;
+          printf("File read successfull\n");
+          // File read successfully
+        } else {
+          printf("File read error\n");
+          DEBUGPlatformFreeFileMemory(Result.Contents);
+          Result.Contents = 0;
+        }
+      } else {
+        printf("File read alloc error\n");
+      }
+    } else {
+      printf("Get file size error\n");
+    }
+    CloseHandle(FileHandle);
+  } else {
+    printf("CreateFileA error\n");
+  }
+  return Result;
+}
+
+void DEBUGPlatformFreeFileMemory(void *Memory) {
+  if (Memory) {
+    VirtualFree(&Memory, 0, MEM_RELEASE);
+  }
+}
+
+bool DEBUGPlatformWriteEntireFile(char *Filename, uint32 MemorySize,
+                                  void *Memory) {
+  bool Result = 0;
+  HANDLE FileHandle =
+      CreateFileA(Filename, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0);
+  if (FileHandle != INVALID_HANDLE_VALUE) {
+    DWORD BytesWritten;
+    if (WriteFile(FileHandle, Memory, MemorySize, &BytesWritten, 0)) {
+      Result = (BytesWritten == MemorySize);
+    }
+    CloseHandle(FileHandle);
+  }
+  return Result;
+}
 
 internal void Win32LoadXInput(void) {
   HMODULE XInputLibrary = LoadLibrary("xinput1_4.dll");
@@ -241,6 +279,16 @@ internal LRESULT CALLBACK MainWindowCallback(HWND Window, UINT Message,
         }
       } else if (VKCode == VK_SPACE) {
       }
+      assert(platformInputEventCallback);
+      InputEvent inputEvent = {0};
+      if (IsDown) {
+        inputEvent.inputEventType = KEY_DOWN;
+      } else {
+        inputEvent.inputEventType = KEY_UP;
+      }
+      inputEvent.inputEventKeyCode = VKCode;
+      // TODO platform independent codes
+      platformInputEventCallback(&inputEvent);
     }
     BOOL AltKeyWasDown = ((LParam & (1 << 29)) != 0);
     if (VKCode == VK_F4 && AltKeyWasDown) {
@@ -265,8 +313,10 @@ internal LRESULT CALLBACK MainWindowCallback(HWND Window, UINT Message,
   return (Result);
 }
 
-void platformMain(loopCallbackFn loopCallback) {
+void platformMain(loopCallbackFn loopCallback,
+                  inputEventCallbackFn inputEventCallback) {
   platformLoopCallback = loopCallback;
+  platformInputEventCallback = inputEventCallback;
 
   HINSTANCE instance = GetModuleHandle(NULL);
   LPSTR commandLine = GetCommandLineA();
@@ -299,13 +349,22 @@ int CALLBACK WinMain(HINSTANCE Instance, HINSTANCE PrevInstance,
                                   CW_USEDEFAULT, 0, 0, Instance, 0);
     if (Window) {
       Win32InitXAudio();
-      BOOL SoundIsPlaying = FALSE;
       GlobalRunning = TRUE;
 
       LARGE_INTEGER LastCounter;
       QueryPerformanceCounter(&LastCounter);
 
       int64_t LastCycleCount = __rdtsc();
+
+      engine_memory EngineMemory = {};
+      EngineMemory.PermanentStorageSize = Megabytes(64);
+      EngineMemory.PermanentStorage =
+          VirtualAlloc(0, EngineMemory.PermanentStorageSize,
+                       MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+      EngineMemory.TransientStorageSize = Gigabytes((uint64)2);
+      EngineMemory.TransientStorage =
+          VirtualAlloc(0, EngineMemory.TransientStorageSize,
+                       MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 
       while (GlobalRunning) {
         MSG Message;
@@ -361,16 +420,15 @@ int CALLBACK WinMain(HINSTANCE Instance, HINSTANCE PrevInstance,
             GlobalBackbuffer.BytesPerPixel,
         };
 
-        engine_sound_buffer SoundBuffer = {GlobalSoundBuffer, 0};
-        platformLoopCallback(&Buffer, &SoundBuffer);
-        SoundIsPlaying = SoundBuffer.SoundPlaying;
+        engine_sound_buffer SoundBuffer = {(int16 *)GlobalSoundBuffer, 0};
+        platformLoopCallback(&EngineMemory, &Buffer, &SoundBuffer);
 
-        int64_t CyclesElapsed = EndCycleCount - LastCycleCount;
+        // int64_t CyclesElapsed = EndCycleCount - LastCycleCount;
 
-        int64_t CounterElapsed = EndCounter.QuadPart - LastCounter.QuadPart;
-        int64_t MSPerFrame =
-            ((1000 * CounterElapsed) / PerfCountFrequency.QuadPart);
-        int32_t MCPerFrame = (int32_t)(CyclesElapsed / (1000 * 1000));
+        // int64_t CounterElapsed = EndCounter.QuadPart - LastCounter.QuadPart;
+        // int64_t MSPerFrame =
+        //     ((1000 * CounterElapsed) / PerfCountFrequency.QuadPart);
+        // int32_t MCPerFrame = (int32_t)(CyclesElapsed / (1000 * 1000));
         // printf("ms elapsed: %lli, %i\n", MSPerFrame, MCPerFrame);
         LastCounter = EndCounter;
         LastCycleCount = EndCycleCount;

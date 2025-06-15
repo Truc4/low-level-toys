@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-gcc -g -O0 src/main.c -o main.exe -lgdi32 -luser32
+gcc -g -O0 -Wall -Wextra src/main.c src/win32_layer.c -o main.exe -lgdi32 -luser32
 
 if %errorlevel% neq 0 (
     echo Build failed.
@@ -9,3 +9,4 @@ if %errorlevel% neq 0 (
 )
 
 main.exe
+
